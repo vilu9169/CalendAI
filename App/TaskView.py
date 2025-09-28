@@ -24,7 +24,6 @@ class TaskView(qtw.QWidget):
         self._rows_raw = []     # raw events from DB (list[dict])
         self._rows_view = []    # filtered/sorted rows currently rendered
 
-        # ---------- UI ----------
         main = qtw.QVBoxLayout(self)
 
         title = qtw.QLabel("✅ Tasks & Events")
@@ -71,7 +70,7 @@ class TaskView(qtw.QWidget):
         # Initial load
         self.refresh_from_db()
 
-    # ---------- Data ----------
+
     def refresh_from_db(self):
         """Reload events from DB and redraw."""
         self._rows_raw = self._fetch_events()
@@ -90,11 +89,9 @@ class TaskView(qtw.QWidget):
                     rows = [dict(zip(cols, r)) for r in rows]
                 return rows
 
-            # If you added get_all_events(), prefer it:
             if hasattr(self.db, "get_all_events"):
                 return self.db.get_all_events()
 
-            # Fallback direct query without changing DB class
             import sqlite3
             conn = sqlite3.connect("calendai.db")
             conn.row_factory = sqlite3.Row
@@ -111,7 +108,6 @@ class TaskView(qtw.QWidget):
             print("TaskView: failed to fetch events:", e)
             return []
 
-    # ---------- Rendering / Filtering ----------
     def _render(self):
         """Apply filters + search, sort chronologically, and fill the table."""
         q = (self.search.text() or "").strip().lower()
@@ -154,7 +150,7 @@ class TaskView(qtw.QWidget):
             if mode == "Today" and not (sd <= today <= ed):
                 continue
             if mode == "This Week":
-                # intersects the week range
+
                 if ed < start_of_week or sd > end_of_week:
                     continue
 
@@ -163,7 +159,6 @@ class TaskView(qtw.QWidget):
             if q and q not in hay:
                 continue
 
-            # Build display + sort key
             start_iso = f"{sd.isoformat()} {st}"
             end_iso   = f"{(ed or sd).isoformat()} {et}"
             when_txt  = sd.strftime("%Y-%m-%d")
@@ -171,7 +166,7 @@ class TaskView(qtw.QWidget):
 
             time_txt  = f"{st}–{et}" if (st or et) and (st != "00:00" or et != "00:00") else ""
             filtered.append({
-                "when_sort": start_iso,      # primary sort
+                "when_sort": start_iso,
                 "when": when_txt,
                 "end": end_txt,
                 "title": title or "(Untitled)",
@@ -180,16 +175,13 @@ class TaskView(qtw.QWidget):
                 "desc": desc
             })
 
-        # Sort by start datetime asc
+
         filtered.sort(key=lambda r: r["when_sort"])
         self._rows_view = filtered
 
-        # Fill table
         self.table.setRowCount(len(filtered))
         for row, r in enumerate(filtered):
             self._set_row(row, r)
-
-        # Resize nicely
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setStretchLastSection(True)
 

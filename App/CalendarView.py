@@ -17,7 +17,6 @@ class CalendarView(qtw.QWidget):
         self.events_by_date: dict[str, list[str]] = {}
         self._formatted_dates: list[qtc.QDate] = []
 
-        # --- UI ---
         main_layout = qtw.QVBoxLayout(self)
 
         label = qtw.QLabel("📅 My Calendar")
@@ -79,7 +78,6 @@ class CalendarView(qtw.QWidget):
         # Initial load
         self.refresh_from_db()
 
-    # --------- Data ---------
     def refresh_from_db(self):
         """Reload events from DB and refresh UI."""
         rows = self._fetch_events()
@@ -155,7 +153,6 @@ class CalendarView(qtw.QWidget):
                 key = d.toString("yyyy-MM-dd")
                 self.events_by_date.setdefault(key, []).append(label)
 
-    # --------- UI updates ---------
     def update_events(self):
         """Refresh list for the currently selected date."""
         selected_date = self.calendar.selectedDate().toString("yyyy-MM-dd")
