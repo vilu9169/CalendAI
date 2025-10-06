@@ -9,12 +9,12 @@ from LoginToken import generate_token, validate_token, save_token_to_file, load_
 class LoginView(qtw.QWidget):
     def __init__(self):
         super().__init__()
+        self.db = CalendarDB()
         self.hide()
         if not self.auto_login():
             self.show()
         
         # Set up layout
-        self.db = CalendarDB()
         self.setWindowTitle("CalendAI - Login")
         self.setFixedSize(qtc.QSize(400, 400))
         layout = qtw.QVBoxLayout()
@@ -82,13 +82,15 @@ class LoginView(qtw.QWidget):
 
     def auto_login(self):
         token = load_token_from_file()
-        if token and validate_token(token):
-            self.accept_login()
+        username = validate_token(token) if token else None
+        print(f"Auto-login with token: {token}, username: {username}")
+        if username:
+            self.accept_login(username=username["username"])
             return True
         return False
-    def accept_login(self):
+    def accept_login(self, username=None):
         self.close()
-        self.main_window = MainWindow()
+        self.main_window = MainWindow(userid=self.db.get_user_id(username) if username else None)
         self.main_window.show()
 
     def save_credentials(self, username):
