@@ -46,6 +46,7 @@ class CalendarDB:
             message TEXT NOT NULL,
             metadata TEXT, -- JSON
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            handled INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
         """)
@@ -71,15 +72,30 @@ class CalendarDB:
 
         conn.close()
         return user
-    
-    def add_event(self, user_id, title, description, start_date, end_date, start_time, end_time):
+    def get_user_id(self, username):
         conn = sqlite3.connect('calendai.db')
         cur = conn.cursor()
 
-        cur.execute("INSERT INTO events (user_id, title, description, start_date, end_date, start_time, end_time) VALUES (?, ?, ?, ?, ?, ?, ?)", (user_id, title, description, start_date, end_date, start_time, end_time))
+        cur.execute("SELECT id FROM users WHERE username=?", (username,))
+        user = cur.fetchone()
 
-        conn.commit()
         conn.close()
+        return user[0] if user else None
+    
+    def add_event(self, user_id, title, description, start_date, end_date, start_time, end_time):
+        import sqlite3
+        conn = sqlite3.connect('calendai.db', timeout=10, isolation_level=None)
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+            INSERT INTO events (user_id, title, description, start_date, end_date, start_time, end_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, title, start_date, start_time, end_date, end_time)
+            DO UPDATE SET description = excluded.description
+            """, (user_id, title.strip(), description or "", start_date, end_date, start_time or "", end_time or ""))
+        finally:
+            conn.close()
+
 
     def get_events(self, user_id):
         conn = sqlite3.connect('calendai.db')
@@ -129,13 +145,20 @@ class CalendarDB:
         return events
     
     def save_message(self, conversation_id, sender, message, user_id=None, metadata=None):
-        conn = sqlite3.connect('calendai.db')
-        cur = conn.cursor()
-        msg_text = self._normalize_message_for_storage(message)
-        meta_text = json.dumps(metadata) if isinstance(metadata, dict) else None
-
-        cur.execute("INSERT INTO messages (conversation_id, user_id, sender, message, metadata) VALUES (?, ?, ?, ?, ?)", (conversation_id, user_id, sender ,msg_text, meta_text))
-
+        conn = sqlite3.connect('calendai.db', timeout=10, isolation_level=None)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA foreign_keys=ON;")
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO messages (conversation_id, user_id, sender, message, metadata)
+                VALUES (?, ?, ?, ?, ?)
+            """, (conversation_id, user_id, sender, message, json.dumps(metadata) if metadata is not None else None))
+            message_id = cur.lastrowid
+            conn.commit()
+            return message_id
+        finally:
+            conn.close()
     @staticmethod
     def _normalize_message_for_storage(message):
         # Accept None, dicts, objects, etc., return a safe string
@@ -191,3 +214,49 @@ class CalendarDB:
 
         conn.close()
         return user is not None
+
+    def get_messages_for_chat(self, conversation_id: int):
+        """
+        Return messages with id + handled so ChatView can filter for tool calls.
+        Shape: [{'id': int, 'role': 'user'|'assistant'|'system', 'content': str, 'handled': int, 'timestamp': str}]
+        """
+        conn = sqlite3.connect("calendai.db")
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, sender AS role, message AS content, handled, timestamp
+            FROM messages
+            WHERE conversation_id=?
+            ORDER BY id ASC
+        """, (conversation_id,))
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+
+    def mark_message_handled(self, message_id: int):
+        conn = sqlite3.connect("calendai.db", timeout=10, isolation_level=None)
+        try:
+            conn.execute("UPDATE messages SET handled=1 WHERE id=?", (message_id,))
+        finally:
+            conn.close()
+
+    def mark_last_unhandled_user_message_handled(self, conversation_id: int):
+        """
+        Mark the most recent *user* message in this conversation as handled.
+        Useful when you just created an event based on the latest instruction.
+        """
+        conn = sqlite3.connect("calendai.db", timeout=10, isolation_level=None)
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT id FROM messages
+                WHERE conversation_id=? AND sender='user' AND handled=0
+                ORDER BY id DESC LIMIT 1
+            """, (conversation_id,))
+            row = cur.fetchone()
+            if row:
+                cur.execute("UPDATE messages SET handled=1 WHERE id=?", (row[0],))
+                return row[0]
+            return None
+        finally:
+            conn.close()

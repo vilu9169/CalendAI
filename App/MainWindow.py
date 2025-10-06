@@ -6,7 +6,7 @@ from ChatView import ChatView
 from TaskView import TaskView
 
 class MainWindow(qtw.QMainWindow):
-    def __init__(self):
+    def __init__(self, userid=None):
         super().__init__()
         main_color = "#352F44"
         second_color = "#5C5470"
@@ -18,7 +18,7 @@ class MainWindow(qtw.QMainWindow):
         self.setStyleSheet(f"background-color: {main_color}; color: {fourth_color};")
         main_widget = qtw.QWidget(self)
         self.setCentralWidget(main_widget)
-
+        self.userID = userid  # Set this when user logs in
 
         splitter = qtw.QSplitter(qtc.Qt.Orientation.Horizontal)
         nav_panel = qtw.QWidget()
@@ -37,9 +37,9 @@ class MainWindow(qtw.QMainWindow):
         nav_layout.addStretch()
         main_content = qtw.QStackedWidget()
 
-        self.home_view = ChatView(palette)
-        self.calendar_view = CalendarView(palette)
-        self.tasks_view = TaskView(palette)
+        self.home_view = ChatView(palette, userid=self.userID)
+        self.calendar_view = CalendarView(palette, user_id=self.userID)
+        self.tasks_view = TaskView(palette, user_id=self.userID)
         self.settings_view = qtw.QLabel("Settings View")
 
 

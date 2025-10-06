@@ -1,7 +1,9 @@
 import PyQt6.QtCore as qtc
 import PyQt6.QtWidgets as qtw
-from ai_call import ai_call, function_call # Assuming you have a module `ai_call` for API integration
+from ai_call import function_call # Assuming you have a module `ai_call` for API integration
 from DB.sqlite import CalendarDB
+from datetime import date, timedelta, datetime
+
 
 class ChatView(qtw.QWidget):
     def _to_safe_text(self, obj) -> str:
@@ -25,32 +27,85 @@ class ChatView(qtw.QWidget):
 
     def _sanitized_history(self):
         """
-        Return self.messages in a format safe for the OpenAI API:
-        - drop entries with None/empty content
-        - ensure content is a string
+        Build a safe history for the model:
+        - drop None/empty content
+        - EXCLUDE user messages that are already handled
         """
         safe = []
         for m in self.messages:
-            role = m.get("role", "user")
-            content = m.get("content")
-            text = self._to_safe_text(content)
-            if text == "[no text content]":
-                # skip empty messages for API calls to avoid
-                # 'Invalid value for content: expected string, got null'
+            # skip handled user messages
+            if m.get("role") == "user" and m.get("handled", 0) == 1:
                 continue
-            safe.append({"role": role, "content": text})
+            text = self._to_safe_text(m.get("content"))
+            if text == "[no text content]":
+                continue
+            safe.append({"role": m.get("role", "user"), "content": text})
         return safe
 
 
-    def __init__(self, palette):
+
+    def _recent_events_for_prompt(self, days_ahead=30, limit=10) -> list[dict]:
+        """
+        Returns a short list of upcoming events, shaped for the prompt.
+        Keys: title, start_date, start_time, location (optional).
+        """
+        # Get events from DB
+        try:
+            if self.user_id is not None and hasattr(self.db, "get_events"):
+                rows = self.db.get_events(self.user_id)  # may be tuples
+                cols = ["id","user_id","title","description","start_date","end_date","start_time","end_time"]
+                if rows and not isinstance(rows[0], dict):
+                    rows = [dict(zip(cols, r)) for r in rows]
+            elif hasattr(self.db, "get_all_events"):
+                rows = self.db.get_all_events()
+            else:
+                rows = []
+        except Exception as e:
+            print("recent events load failed:", e)
+            rows = []
+
+        # Filter to next N days and shape
+        today = date.today()
+        until = today + timedelta(days=days_ahead)
+
+        def parse(d):
+            try:
+                return datetime.strptime(d, "%Y-%m-%d").date()
+            except Exception:
+                return None
+
+        upcoming = []
+        for r in rows:
+            sd = parse((r.get("start_date") or "").strip())
+            if not sd:
+                continue
+            if today <= sd <= until:
+                upcoming.append({
+                    "title": (r.get("title") or "").strip() or "(Untitled)",
+                    "start_date": sd.isoformat(),
+                    "start_time": (r.get("start_time") or "").strip(),
+                    # include if your schema has it; otherwise it will be blank
+                    "location": (r.get("location") or "").strip()
+                })
+
+        # sort and cap
+        upcoming.sort(key=lambda e: (e["start_date"], e.get("start_time","") or "00:00"))
+        return upcoming[:limit]
+
+    def __init__(self, palette, userid=None):
         super().__init__()
         # Set up layout
+        self.user_id = userid
         self.db = CalendarDB()
-        self.messages = self.db.get_messages(conversation_id=1)
+        self.messages = self.db.get_messages_for_chat(conversation_id=1)
         self.second_color = palette[1]
         self.third_color = palette[2]
         self.fourth_color = palette[3]
         print(self.messages)
+
+        self.pending_event = None
+        self.pending_ui_open = False  # optional but nice to have
+
 
         self.layout = qtw.QVBoxLayout()
         self.setLayout(self.layout)
@@ -112,8 +167,9 @@ class ChatView(qtw.QWidget):
         self.add_message(text, "user")
         self.messages.append({"role": "user", "content": text})
         self.text_edit.clear()
-        self.db.save_message(conversation_id=1, sender="user", message=text)
-
+        msg_id = self.db.save_message(conversation_id=1, sender="user", message=text)
+        self.messages[-1]["id"] = msg_id
+        self.messages[-1]["handled"] = 0
         print("mes: ", self.messages)
 
 
@@ -123,8 +179,8 @@ class ChatView(qtw.QWidget):
 
 
         self.add_message(ai_text, "ai")
-        self.messages.append({"role": "assistant", "content": ai_text})
-
+        aid = self.db.save_message(conversation_id=1, sender="assistant", message=ai_text)
+        self.messages.append({"role": "assistant", "content": ai_text, "id": aid})
 
         metadata = None
         if hasattr(ai_response, "model_dump"):
@@ -137,7 +193,6 @@ class ChatView(qtw.QWidget):
             conversation_id=1,
             sender="assistant",
             message=ai_text,
-            metadata=metadata
         )
         if event:
             self.add_event_suggestion_widget(event)
@@ -177,11 +232,36 @@ class ChatView(qtw.QWidget):
 
     def get_ai_response(self, user_message):
         try:
+            recent = self._recent_events_for_prompt(days_ahead=30, limit=10)
+            res, event = function_call(user_message, self._sanitized_history(), recent_events=recent, has_pending=self.pending_ui_open)
 
-            res, event = function_call(user_message, self._sanitized_history())
+            # ⬇️ NEW: if the model produced a tool call, mark the prompting user msg handled now
+            if event:
+                try:
+                    handled_id = self.db.mark_last_unhandled_user_message_handled(conversation_id=1)
+                except Exception:
+                    handled_id = None
+
+                # reflect in memory so _sanitized_history drops it immediately
+                if handled_id:
+                    for m in reversed(self.messages):
+                        if m.get("id") == handled_id:
+                            m["handled"] = 1
+                            break
+                else:
+                    # fallback: mark latest unhandled user msg
+                    for m in reversed(self.messages):
+                        if m.get("role") == "user" and m.get("handled", 0) != 1:
+                            m["handled"] = 1
+                            break
+
+                # Keep a pending event reference for the UI confirm button
+                self.pending_event = event
+
             return res, event
         except Exception as e:
             return f"Error: {e}", None
+
 
 
     def add_event_suggestion_widget(self, event_suggestion):
@@ -216,26 +296,63 @@ class ChatView(qtw.QWidget):
         suggestion_widget.setLayout(suggestion_layout)
 
         self.messages_layout.addWidget(suggestion_widget)
+
+        self.pending_event = event_suggestion
+        self.pending_ui_open = True
+
         self.scroll_area.verticalScrollBar().setValue(self.scroll_area.verticalScrollBar().maximum())
 
     def confirm_add_event(self, event_suggestion, suggestion_widget):
-        """Add event to database."""
-        self.db.add_event(
-            user_id=1,  # Replace with actual user ID
+        user_id = self.user_id  # your real user id
+
+        # Skip if exists (nice UX message)
+        if hasattr(self.db, "event_exists") and self.db.event_exists(
+            user_id=user_id,
             title=event_suggestion["title"],
             start_date=event_suggestion["start_date"],
             end_date=event_suggestion["end_date"],
-            start_time=event_suggestion["start_time"],
-            end_time=event_suggestion["end_time"],
-            description=event_suggestion["description"]
+            start_time=event_suggestion.get("start_time"),
+            end_time=event_suggestion.get("end_time"),
+        ):
+            self.add_message("ℹ️ That event already exists — skipped.", "ai")
+            self.remove_event_suggestion(suggestion_widget)
+            return
+
+        # Idempotent insert (will update description if same signature)
+        self.db.add_event(
+            user_id=user_id,
+            title=event_suggestion["title"],
+            description=event_suggestion.get("description"),
+            start_date=event_suggestion["start_date"],
+            end_date=event_suggestion["end_date"],
+            start_time=event_suggestion.get("start_time"),
+            end_time=event_suggestion.get("end_time"),
         )
+        
+
+        handled_id = self.db.mark_last_unhandled_user_message_handled(conversation_id=1)
+
+        # Make history consistent in memory
+        for m in reversed(self.messages):
+            if m.get("role") == "user" and m.get("handled", 0) != 1:
+                m["handled"] = 1
+                if handled_id and "id" in m and m["id"] == handled_id:
+                    # (optional) you matched the exact row
+                    pass
+                break
+        self.pending_event = None
+        self.pending_ui_open = False
         self.add_message("✅ Event successfully added!", "ai")
         self.remove_event_suggestion(suggestion_widget)
 
+    # if you have CalendarView/TaskView instances, refresh them here
+    # self.calendar_view.refresh_from_db()
+    # self.task_view.refresh_from_db()
     def remove_event_suggestion(self, widget):
         """Remove event suggestion widget."""
         widget.setParent(None)
-
+        self.pending_event = None
+        self.pending_ui_open = False
     # def resizeEvent(self, event):
     #     """Override resize event to adjust message widths dynamically."""
     #     for i in range(self.messages_layout.count()):
